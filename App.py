@@ -129,6 +129,43 @@ def simple_resume_parser(text):
     }
 
 
+def extract_name_fallback(resume_text):
+    # Primary: explicit "Name: Ayush Kumar Shaw"
+    match = re.search(r'Name[:\s\-–]*([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})', resume_text)
+    if match:
+        return match.group(1).strip()
+    # Secondary: first non-header line with 2-3 capitalized words excluding known bad tokens
+    lines = [l.strip() for l in resume_text.splitlines() if l.strip()]
+    for line in lines[:7]:
+        low = line.lower()
+        if any(kw in low for kw in ("curriculum vitae", "cv", "resume", "profile", "durgapur", "india")):
+            continue
+        parts = line.split()
+        if 2 <= len(parts) <= 3 and all(p[0].isupper() and p.isalpha() for p in parts if p):
+            return " ".join(parts)
+    # Tertiary: from email prefix
+    email_match = re.search(r'[\w\.-]+@[\w\.-]+\.\w+', resume_text)
+    if email_match:
+        prefix = email_match.group(0).split('@')[0]
+        name_parts = re.split(r'[._\-]', prefix)
+        if name_parts:
+            return " ".join(p.capitalize() for p in name_parts if p)
+    return "Candidate"
+
+
+def is_bad_name(candidate: str) -> bool:
+    if not candidate:
+        return True
+    low = candidate.strip().lower()
+    if any(kw in low for kw in ("cv", "curriculum vitae", "resume", "durgapur", "india", "address")):
+        return True
+    if ',' in candidate:  # likely location or composite
+        return True
+    if len(candidate.split()) == 1 or any(ch.isdigit() for ch in candidate):
+        return True
+    return False
+
+
 def classify_skills(skills_list):
     category_keywords = {
         "Data Science": ['tensorflow', 'keras', 'pytorch', 'machine learning', 'deep learning', 'flask', 'streamlit', 'data science'],
@@ -210,7 +247,7 @@ def course_recommender(course_list):
     return rec_course
 
 
-# ✅ ONLY CHANGE: Updated color for Predicted Field box
+# Page config and styles
 st.set_page_config(page_title="Smart Resume Analyzer", layout="wide")
 st.markdown("""
     <style>
@@ -238,24 +275,46 @@ def run():
             resume_bytes = io.BytesIO(pdf_file.getbuffer())
             resume_text = pdf_reader(resume_bytes)
 
+            # Name extraction with strict "Name:" preference and fallback
+            parsed_name = None
             try:
                 from pyresparser import ResumeParser
                 temp_path = f"temp_{int(time.time())}.pdf"
                 with open(temp_path, "wb") as f:
                     f.write(resume_bytes.getbuffer())
                 resume_data = ResumeParser(temp_path).get_extracted_data()
-                if not resume_data:
-                    raise ValueError("Empty parse")
-                if not resume_data.get('name') and resume_data.get('email'):
-                    prefix = resume_data['email'].split('@')[0]
-                    parts = re.split(r'[._\-]', prefix)
-                    resume_data['name'] = " ".join(p.capitalize() for p in parts if p)
             except Exception:
+                resume_data = None
+
+            # Always ensure resume_text exists
+            if 'resume_text' not in locals():
+                resume_text = pdf_reader(resume_bytes)
+
+            if resume_data:
+                # First try explicit "Name:" line
+                name_after_label = None
+                label_match = re.search(r'Name[:\s\-–]*([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})', resume_text)
+                if label_match:
+                    name_after_label = label_match.group(1).strip()
+                # Use parser name if good; else prefer label; else fallback
+                parser_name = (resume_data.get('name') or "").strip()
+                if name_after_label and not is_bad_name(name_after_label):
+                    parsed_name = name_after_label
+                elif not is_bad_name(parser_name):
+                    parsed_name = parser_name
+                else:
+                    parsed_name = extract_name_fallback(resume_text)
+                resume_data['name'] = parsed_name
+            else:
                 resume_data = simple_resume_parser(resume_text)
+                parsed_name = resume_data.get('name', '').strip()
+                if is_bad_name(parsed_name):
+                    parsed_name = extract_name_fallback(resume_text)
+                    resume_data['name'] = parsed_name
 
             # Basic Info
             st.markdown("<div class='section-title'>Resume Analysis</div>", unsafe_allow_html=True)
-            name = resume_data.get('name', 'Candidate')
+            name = parsed_name if parsed_name else "Candidate"
             st.success(f"Hello, {name}")
             col1, col2, col3 = st.columns(3)
             with col1:
@@ -325,7 +384,7 @@ def run():
                 jd_keywords = extract_jd_keywords(jd_text, top_n=40)
                 matched, missing, coverage = compute_ats_match(jd_keywords, detected_skills)
 
-                st.markdown(f"**ATS Match Score:** <span style='color:#4b2be3; font-weight:700;'>{coverage}%</span>", unsafe_allow_html=True)
+                st.markdown(f"**ATS Match Score:** <span class='color:#4b2be3; font-weight:700;'>{coverage}%</span>", unsafe_allow_html=True)
                 two = st.columns(2)
                 with two[0]:
                     st.markdown("**✅ Matched Keywords**")
@@ -424,11 +483,19 @@ def run():
 
         st.markdown("</div>", unsafe_allow_html=True)
 
-    else:
+    else:  # Admin with password
         st.title("📊 Admin Dashboard")
-        df = pd.read_sql_query("SELECT * FROM user_data", conn)
-        st.dataframe(df)
-        st.markdown(get_table_download_link(df, 'user_data.csv', 'Download CSV'), unsafe_allow_html=True)
+        st.sidebar.markdown("### Admin Login")
+        username = st.sidebar.text_input("Username")
+        password = st.sidebar.text_input("Password", type="password")
+        # credentials: username=admin, password=ayushaks099
+        if username == "admin" and password == "ayushaks099":
+            st.success("Welcome Admin 👑")
+            df = pd.read_sql_query("SELECT * FROM user_data", conn)
+            st.dataframe(df)
+            st.markdown(get_table_download_link(df, 'user_data.csv', 'Download CSV'), unsafe_allow_html=True)
+        else:
+            st.warning("Please enter valid admin credentials to access the dashboard.")
 
 
 if __name__ == "__main__":
